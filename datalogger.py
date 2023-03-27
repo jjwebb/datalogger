@@ -1,26 +1,30 @@
 # Bundle this app as a single executable with PyInstaller:
-# pyinstaller --onefile --windowed --icon=icon.ico datalogger.py
+# pyinstaller --onefile --windowed --icon=icon.ico --add-data 'buttons.json:.' datalogger.py
+# if not on $PATH:
+# python -m PyInstaller --onefile --windowed --icon=icon.ico --add-data 'buttons.json;.' datalogger.py
 
-# monitor UART input on COM5
-# create GUI button to start/stop data collection
-# create GUI button to clear data
+# monitor UART input on COM port
 
+import json
+import os
+from os import path
 import serial
 import serial.tools.list_ports
 import time
-#import msvcrt
 import tkinter as tk
 import threading
 import queue 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.style as mplstyle
+mplstyle.use('fast')
 
 command = queue.Queue()
 data = queue.Queue()
 
-base_width = 800
-base_height = 400
+base_width = 820
+base_height = 300
 
 # create a GUI window
 window = tk.Tk()
@@ -58,7 +62,7 @@ def applyPlotSettings(plotName):
                 if line.get_label() == name:
                     line.remove()
             plots[plotName]["plot"].axhline(y=settings["value"], color=settings["color"], label=name)
-            plots[plotName]["plot"].legend(fontsize=6)
+            plots[plotName]["plot"].legend(fontsize=6, loc="upper right")
             print ("Applied yline setting for " + plotName + ": " + str(plotSettings[plotName]["yline"]))
 
 # list of parameters to check for in the message
@@ -85,19 +89,25 @@ def addPlotSetting(message: str):
         line["color"] = params[4] if len(params) > 4 else "blue"
         # add the line to the plot settings by name
         plotSettings[params[0]]["yline"][name] = line
-        print ("Added yline setting for " + params[0] + ": " + str(plotSettings[params[0]]["yline"]))
+        #print ("Added yline setting for " + params[0] + ": " + str(plotSettings[params[0]]["yline"]))
 
     if params[0] in plots:
         applyPlotSettings(params[0])
 
 
-plot_width = 300
-plot_height = 300
+plot_width = 380
+plot_height = 400
 padding = 0.75
 
+plots_width = 0
+plots_height = 0
+terminal_height = 0
+
 def add_plot(word):
-    num_rows = int(len(plots) / max_cols) + 1
-    num_cols = min(max_cols, len(plots)+1)
+    global base_width, base_height, plots_width, plots_height, terminal_height
+
+    num_rows = int(len(plots) / MAX_PLOT_COLS) + 1
+    num_cols = min(MAX_PLOT_COLS, len(plots)+1)
     print("num_rows: " + str(num_rows) + " num_cols: " + str(num_cols))
     #gs = gridspec.GridSpec(num_rows, num_cols)
     #fig.set_figwidth(num_cols * figW)
@@ -119,39 +129,43 @@ def add_plot(word):
     applyPlotSettings(word)
 
     # calculate size of canvas and set window geometry
-    canvas_width = num_cols * plot_width + plot_width * (num_cols - 1) * padding
-    canvas_height = num_rows * plot_height + plot_height * (num_rows - 1) * padding
-    window.geometry("{}x{}".format(int(base_width+canvas_width), int(base_height+canvas_height)))
+    plots_width = num_cols * plot_width
+    plots_height = num_rows * plot_height
+    window.geometry("{}x{}".format(int(base_width + plots_width), 
+                                   int(base_height + plots_height + terminal_height)))
 
     for plot, i in zip(plots.values(), range(len(plots))):
         row, col = divmod(i, num_cols)
-        plot["plot"].change_geometry(num_rows, num_cols, i+1)
         plot["plot"].set_position(gs[row, col].get_position(fig))
         plot["plot"].set_subplotspec(gs[row, col])
 
+    # fig.canvas.draw()
+    # fig.canvas.flush_events()
+
 terminals = {}
+terminals_frame = tk.Frame(window)
+MAX_TERMINAL_COLS = 4
+TERMINAL_WIDTH = 60
+TERMINAL_HEIGHT = 8
 
 def newTerminal(name):
+    global base_width, base_height, plots_width, plots_height, terminal_height
+    row, col = divmod(len(terminals), MAX_TERMINAL_COLS)
+
     terminals[name] = {}
     terminals[name]["frame"] = tk.Frame(terminals_frame)
-    # space all terminals evenly
-    #terminals[name]["frame"].grid(row=0, column=len(terminals))
-    #terminals[name]["frame"].grid_columnconfigure(len(terminals), weight=1, uniform="terminals")
-    #terminals[name]["frame"].grid(row=0, column=len(terminals), sticky="nsew")
     terminals[name]["scrollbar"] = tk.Scrollbar(terminals[name]["frame"])
     terminals[name]["scrollbar"].pack(side=tk.RIGHT, fill=tk.Y)
-    terminals[name]["terminal"] = tk.Text(terminals[name]["frame"], height=10, width=5, yscrollcommand=terminals[name]["scrollbar"].set)
+    terminals[name]["terminal"] = tk.Text(terminals[name]["frame"], height=TERMINAL_HEIGHT, width=TERMINAL_WIDTH, yscrollcommand=terminals[name]["scrollbar"].set)
     terminals[name]["terminal"].pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     terminals[name]["scrollbar"].config(command=terminals[name]["terminal"].yview)
-    terminals[name]["frame"].pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
-    # if only one terminal, expand to fill window
-    terminals[name]["frame"].pack_propagate(True if len(terminals) == 1 else False)
 
-    # configure terminal frames to resize evenly
-    # for i in range(len(terminals)):
-    #     terminals_frame.grid_columnconfigure(i, weight=1, uniform="terminals")
-    # for i, terminal in enumerate(terminals.values()):
-    #     terminal["frame"].grid_columnconfigure(i, weight=1, uniform="terminals")
+    terminals[name]["frame"].grid(row=row, column=col, sticky="nsew")
+
+    # Configure the column and row weights
+    terminals_frame.grid_columnconfigure(col, weight=1)
+    terminals_frame.grid_rowconfigure(row, weight=1)
+
 
 def logToTerminal(terminalName, message):
     if terminalName not in terminals:
@@ -160,15 +174,17 @@ def logToTerminal(terminalName, message):
     terminal.insert(tk.END, message)
     terminal.see(min(tk.END, terminal.index("end-1c")))
 
+testVarNum = 0
 def data_callback():
-    global points
+    global points, testVarNum
     while True:
     #if not data.empty():
         message: str = data.get(block=True)
         params = message.split()
         timestamp = time.strftime("[%H:%M:%S", time.localtime()) + ".{:03d}]".format(round(time.time() * 1000) % 1000)
 
-        if len(params) == 1:
+        numParams = len(params)
+        if numParams == 1:
             logToTerminal("main", timestamp + " " + message)
 
         # if there are at least two terms in the message and the 2nd term is a custom setting, add it
@@ -177,20 +193,18 @@ def data_callback():
             logToTerminal("main", timestamp + " " + message)
 
         # if the message is 2 or 3 terms long, and the 2nd term is a number, plot it
-        elif 1 < len(params) < 4: 
+        elif 1 < numParams < 4: 
             word, value, *extraTerm = params
-            if points % 20 == 0 and send_test_messages.get():
-                word = word + str(points // 20)
+
             value = getNumber(value)
             if word.isalnum() and value is not None:
-                #print("Plotting! " + word + " " + value)
                 if word not in plots:
                     add_plot(word)
                     newTerminal(word)
 
                 logToTerminal(word, timestamp + " " + message)
-                #plots[word]["plot"].plot(time.time(), value, 'bo')
                 plots[word]["len"] += 1
+
                 # plot the value as a blue point, or as a green point if any extra modifier term is present
                 plots[word]["plot"].plot(plots[word]["len"], value, 'go' if extraTerm == [] else 'bo')
                 points+=1
@@ -210,32 +224,24 @@ def data_callback():
                     f = open("TTL.txt", "a", newline='\n')
                     f.write(timestamp + " " + message)  
                     f.close()
-    #window.after(1, data_callback)
-
+            
 def serialPoll(baud_rate, serial_port):
-    #baud = int(baud_rate.get())
-    #baud = baud_rate.get()
+    testMessages = 0
     
     ser = serial.Serial()
+
     if ser.isOpen():
         ser.close()
-    # try:
-    #     ser = serial.Serial(None, baud_rate, timeout=0.02)
-    # except:
-    #     data.put("error serial port: " + ser.port + "\n")
-    #     return
-    #ser.flush()
+
     last_send = time.time()
 
     while (True):
         if not command.empty():
                 cmd = command.get()
                 if cmd == "start" and not ser.isOpen():
-                    #ser.port = serial_port
                     try:
                         # set baud rate, serial port, and timeout
                         ser.baudrate = baud_rate()
-                        print("Baud type: " + str(type(baud_rate())))
                         print("Baud: " + str(baud_rate()))
                         print("opening serial port: " + serial_port())
                         ser.port = serial_port()
@@ -250,21 +256,27 @@ def serialPoll(baud_rate, serial_port):
                     print("quitting serial thread!")
                     ser.close()
                     break
+                elif type(cmd) == int:
+                    if ser.isOpen():
+                        ser.write(cmd.to_bytes(1, byteorder='big'))
+                        #print("sending: " + str(cmd))
+                        #ser.write(cmd)
                 else:
                     print("ser.isOpen(): " + str(ser.isOpen()))
                     print("unknown command: " + cmd)
     
         if ser.isOpen():
             if ser.in_waiting > 0:
-                #line = ser.readline().decode('utf-8').rstrip()
                 line = ser.readline().decode('utf-8', errors='ignore').rstrip()
                 if (line != ""):
                     data.put((line+"\n") if line[-1] != "\n" else line)
             else:
                 time.sleep(0.001)
             # send a character to the serial port if time since last send is > 1 second
-            if send_test_messages.get() and time.time() - last_send > 0.1:
-                ser.write(b'helloWorld ' + str.encode(str(time.time())))
+            if send_test_messages.get() and time.time() - last_send > 0.2:
+                i = testMessages // 20
+                testMessages += 1
+                ser.write(str.encode(f'helloWorld{i} ' + str(time.time())))
                 last_send = time.time()
         else:
             time.sleep(0.1) # pause so we don't eat up CPU cycles (CPU usage spikes without this)
@@ -273,17 +285,9 @@ def serialPoll(baud_rate, serial_port):
         #     print("stopping serial poll!")
         #     break
 
-    #window.after(100, serialPoll)
-
 plots = {}
 points = 1
-
-max_cols = 3  # Change this to the number of columns you want
-
-# num_cols = min(max_cols, len(plots))
-# num_rows = int(len(plots) / max_cols) + 1
-# gs = gridspec.GridSpec(num_rows, num_cols)
-# gs.update(hspace=0.5, wspace=0.5)  # Change these values to adjust spacing and padding
+MAX_PLOT_COLS = 3  # Change this to the number of columns you want
 
 ## FRAME FOR BUTTONS ##
 
@@ -345,14 +349,13 @@ baud_menu.pack(side=tk.LEFT, padx=5, pady=5)
 
 # create a button to clear data
 def clear():
-    global plots, points, fig, terminals
+    global plots, points, fig, terminals, plots_width, plots_height, terminal_height
     terminals["main"]["terminal"].delete(1.0, tk.END)
 
     # delete all terminals except main
     for terminal in terminals:
         if terminal != "main":
             terminals[terminal]["frame"].destroy()
-            #del terminals[terminal]
     terminals = {"main": terminals["main"]}
 
     plots = {}
@@ -361,7 +364,15 @@ def clear():
     # reset size of window
     window.geometry("{}x{}".format(base_width, base_height))
     points = 1
+
     canvas.draw()
+
+    # Reset the grid configuration for rows and columns
+    for i in range(MAX_TERMINAL_COLS):
+        terminals_frame.grid_columnconfigure(i, weight=0)
+        terminals_frame.grid_rowconfigure(i, weight=0)
+    terminals_frame.grid_columnconfigure(0, weight=1)
+    terminals_frame.grid_rowconfigure(0, weight=1)
     
 clear_button = tk.Button(buttonFrame, text="Clear", command=clear)
 clear_button.pack(side=tk.LEFT, padx=5, pady=5)
@@ -381,21 +392,44 @@ send_test_messages = tk.BooleanVar()
 send_test_messages_checkbox = tk.Checkbutton(buttonFrame, text="Send test messages", variable=send_test_messages)
 send_test_messages_checkbox.pack(side=tk.LEFT, padx=5, pady=5)
 
+
+## ACTION BUTTONS ##
+
+def rearrange_buttons(event):
+    window_width = window.winfo_width()
+    min_button_width = 120  # Change to make buttons fit in window
+    num_of_columns = window_width // min_button_width
+
+    # Rearrange the buttons
+    for index, button in enumerate(buttons_frame.winfo_children()):
+        row, col = divmod(index, num_of_columns)
+        button.grid(row=row, column=col, padx=5, pady=5)
+
+def create_buttons(buttons):
+    for label, value in buttons.items():
+        button = tk.Button(buttons_frame, text=label, command=lambda v=value: command.put(v))
+        button.pack_forget()
+
+buttonsFile = path_to_dat = path.abspath(path.join(path.dirname(__file__), 'buttons.json'))
+
+# If buttons.json exists, create buttons from the file. Otherwise, this section will be skipped.
+if (path.isfile(buttonsFile)):
+    # open JSON file and read the label and corresponding action number for each button
+    with open(buttonsFile) as f:
+        buttons = json.load(f)
+
+    buttons_frame = tk.Frame(window)
+    buttons_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
+
+    create_buttons(buttons)
+    window.bind('<Configure>', rearrange_buttons)
+
+
 ## TERMINALS ##
 
-# create a terminal window that will display the data
+# create a frame for terminals that will display the data
 terminals_frame = tk.Frame(window)
-#terminals_frame.grid()
 terminals_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-
-# terminal_scrollbar = tk.Scrollbar(terminal_frame)
-# terminal_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-# terminal = tk.Text(terminal_frame, height=10, width=80, yscrollcommand=terminal_scrollbar.set)
-# terminal.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-# terminal_scrollbar.config(command=terminal.yview)
 
 # START THREAD FOR SERIAL POLLING #
 
@@ -409,15 +443,14 @@ newTerminal("main")
 
 figW = 5
 figH = 4
-fig = plt.Figure(figsize=(figW, figH), dpi=100)
+#fig = plt.Figure(figsize=(figW, figH), dpi=100)
+fig = plt.Figure()
 fig.tight_layout()
 canvas = FigureCanvasTkAgg(fig, master=window)
+# set size of the canvas
+canvas.get_tk_widget().config(width=figW*100, height=figH*300)
 canvas.draw()
-canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
-
-
-
-#window.after(10, data_callback)
+canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
 # start the GUI window
 window.mainloop()
